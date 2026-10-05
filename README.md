@@ -1,61 +1,75 @@
-# Movie Ticket Booking System — Concurrent Seat Locking
+About This Project
 
-Clean rebuild of the project, same package/table names/endpoints as before,
-with the seat-locking logic fixed so it no longer throws
-"Could not commit JPA transaction" under concurrent requests.
+I built this backend to solve one problem I kept noticing in simple booking apps: what happens when two people try to book the same seat at the same time?
 
-## What changed vs. the old version
+In most basic projects, both requests see the seat as available and both succeed, so the seat gets double-booked. I wanted to handle this properly instead of ignoring it.
 
-- `SeatRepository.findByIdForUpdate()` now uses Spring Data's `@Lock(LockModeType.PESSIMISTIC_WRITE)`
-  annotation instead of a hand-written native `SELECT ... FOR UPDATE` query.
-  Hibernate needs to know a pessimistic lock is being taken through its own
-  API so its internal version/lock bookkeeping stays consistent — a raw
-  native query bypasses that bookkeeping, which is what was causing the
-  transaction commit failure.
-- `SeatLockingService.holdSeat()` now explicitly checks
-  `seat.getStatus() != SeatStatus.AVAILABLE` **after** acquiring the lock,
-  and throws a clean `SeatUnavailableException` if someone already grabbed
-  the seat. Without this check, a thread could acquire the lock late and
-  still blindly overwrite a seat that was already held.
-- Added `GlobalExceptionHandler` (`@RestControllerAdvice`) so:
-  - Seat already held/booked → `409 Conflict` with a clear message
-  - Seat ID doesn't exist → `404 Not Found`
-  - Invalid request body → `400 Bad Request`
-  - Anything truly unexpected → `500`, but with the real exception message
-    in the response body instead of a generic one
+Built with Java, Spring Boot, MySQL and REST APIs.
 
-## Setup
 
-1. **Extract this zip** and open the folder in IntelliJ as a Maven project
-   (`File → Open`, select the folder, let it import).
-2. **Set your MySQL password** in `src/main/resources/application.properties`:
-   ```
-   spring.datasource.password=yourpassword
-   ```
-3. **Make sure MySQL is running** locally on port 3306.
-4. **Run `MovieBookingApplication.main()`**. On first run it creates the
-   `moviebooking` database and the `shows`, `seats`, `bookings` tables
-   automatically.
-5. **Seed one show and one seat** — open `seed-data.sql` (in the project
-   root) in MySQL Workbench and run it statement by statement, noting the
-   real seat ID it creates.
-6. **Update the seat ID** in `ConcurrencyTestSimple.java`'s `BODY` field to
-   match what you seeded.
-7. **With the app still running**, run `ConcurrencyTestSimple.main()`
-   separately (it opens its own console tab). You should now see:
-   - Exactly 1 request with `status code: 200`
-   - The other 19 with `status code: 409` and a body like
-     `"Seat 1 is not available (current status: HELD)"`
+How It Works
 
-That 1-success/19-conflict result, with real 409s instead of 500s, is your
-proof the locking logic works correctly under concurrency — safe to use as
-the evidence number in your resume bullet.
+1. When a user selects a seat, I hold it for them temporarily.
+2. If they don't confirm in time, a scheduled job releases the seat so someone else can book it.
+3. If they confirm in time, the hold becomes a real booking.
 
-## Endpoints
 
-- `POST /api/seats/hold` — body `{"seatId": 1}` — holds a seat for 60 seconds
-- `POST /api/seats/confirm` — body `{"seatId": 1, "customerName": "...", "customerEmail": "..."}` — confirms a held seat
-- `POST /api/seats/release` — body `{"seatId": 1}` — releases a held seat early
+How I Prevent Double-Booking
 
-A background job runs every 10 seconds and automatically releases any seat
-that's been `HELD` longer than 60 seconds without being confirmed.
+I used two layers of protection:
+
+- Row-level locking (SELECT ... FOR UPDATE): while one request is working on a seat, the database makes other requests wait for that seat.
+- Optimistic locking (JPA @Version): every seat has a version number. If two requests try to update the same version, only the first one succeeds and the other fails safely.
+
+I used both because they cover different cases. Row locking stops the conflict upfront, and versioning is a safety net if something slips through.
+
+
+How It Is Better Than Basic Booking Systems
+
+- Basic apps check "is the seat free?" and then book it, which creates a race condition. Mine locks the seat at the database level during the operation.
+- In basic apps, two users can end up with the same seat. In mine, only one request wins and the other gets a clean failure.
+- In basic apps, a seat can stay stuck if the user leaves midway. In mine, holds expire automatically.
+- Basic apps use one layer of protection or none. Mine uses two.
+
+
+Database Design
+
+- Shows: movie and show timing
+- Seats: every seat linked to a show
+- Bookings: which user booked which seat
+
+
+REST APIs
+
+- Lock (hold) a seat
+- Confirm a booking
+- Release a seat
+
+I tested the APIs using Postman.
+
+
+What I Learned
+
+- How race conditions actually happen in backend code
+- When to use pessimistic vs optimistic locking
+- How to build a hold-and-expire flow using scheduled jobs
+
+
+Tech Stack
+
+Java, Spring Boot, Spring Data JPA, MySQL, REST, Postman
+
+
+Run Locally
+
+1. Clone the repo
+2. Create a MySQL database and update application.properties with your username and password
+3. Run: mvn spring-boot:run
+4. Test the APIs using Postman
+
+
+Future Improvements
+
+- Payment integration
+- Redis for faster seat holds
+- User login with JWT
